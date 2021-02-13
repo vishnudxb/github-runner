@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-runner
+  namespace: github
+  labels:
+    app: github-runner
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: github-runner
+  template:
+    metadata:
+      labels:
+        app: github-runner
+    spec:
+      containers:
+      - name: github-runner
+        imagePullPolicy: Always
+        image: gcr.io/$GCP_PROJECT/github-runner
+        resources:
+          requests:
+            cpu: "0.25"
+            memory: "400Mi"
+          limits:
+            cpu: "0.55"
+            memory: "500Mi"
+        envFrom:
+        - secretRef:
+            name: github-secret
+
