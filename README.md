@@ -26,24 +26,5 @@ docker run --name github-runner \
      gcr.io/$GCP_PROJECT/github-runner
 ```
 
-Create an organization-wide runner.
-
-```sh
-docker run --name github-runner \
-    -e GITHUB_OWNER=username-or-organization \
-    -e GITHUB_PAT=[PAT] \
-    gcr.io/$GCP_PROJECT/github-runner
-```
-
-Set labels on the runner.
-
-```sh
-docker run --name github-runner \
-    -e GITHUB_OWNER=username-or-organization \
-    -e GITHUB_REPOSITORY=my-repository \
-    -e GITHUB_PAT=[PAT] \
-    -e RUNNER_LABELS=comma,separated,labels \
-    gcr.io/$GCP_PROJECT/github-runner
-```
 
 
