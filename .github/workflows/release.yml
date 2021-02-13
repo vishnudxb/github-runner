@@ -1,0 +1,134 @@
+name: Build and Deploy to Github Runner to GKE
+on:
+  push:
+    paths-ignore:  # Don't trigger deployment when any of these files/folders changes.
+      - '!.github/workflows/release.yml'
+      - 'README.md'
+      - '.gitignore'
+      - '.editorconfig'
+    branches:
+      - master
+
+jobs:
+  cleanup-runs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: rokroskar/workflow-run-cleanup-action@v0.2.2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  setup-build-publish-deploy:
+    name: Setup, Build, Publish, and Deploy to Prod
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip deploy]') || github.event.issue.closed_at != null"
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    # Checkout vault-secret-to-dot-env repo
+    - name: Checkout vault-to-env
+      uses: actions/checkout@v2
+      with:
+        repository: 'vishnudxb/vault-secret-to-dot-env'
+        ref: 'v1'
+        path: '.github/actions/vault-secret-to-dot-env'
+        token: ${{ secrets.ACCESS_TOKEN }}
+
+    - name: Import Secrets
+      id: secrets
+      uses: hashicorp/vault-action@v2.0.0
+      with:
+        url: ${{ secrets.VAULT_URL }}
+        method: approle
+        roleId: ${{ secrets.ROLE_ID_PROD }}
+        secretId: ${{ secrets.SECRET_ID_PROD }}
+        exportEnv: false
+        secrets: |
+            vishnudxb/data/github-runner/prod GITHUB_OWNER | GITHUB_OWNER ;
+            vishnudxb/data/github-runner/prod GITHUB_REPOSITORY | GITHUB_REPOSITORY ;
+            vishnudxb/data/github-runner/prod GITHUB_PAT | GITHUB_PAT ;
+            vishnudxb/data/github-runner/prod RUNNER_LABELS | RUNNER_LABELS ;
+            vishnudxb/data/github-runner/prod DOCKER_HOST | DOCKER_HOST ;
+            vishnudxb/data/github-runner/prod AGENT_TOOLSDIRECTORY | AGENT_TOOLSDIRECTORY ;
+
+    - name: Vault to .env
+      id: vault-to-dot-env
+      uses: ./.github/actions/vault-secret-to-dot-env
+      with:
+        secrets: ${{ toJson(steps.secrets.outputs) }}
+        output_file: ${{ github.workspace }}/.env
+
+    # Setup gcloud CLI
+
+    - uses: google-github-actions/setup-gcloud@master
+      with:
+        version: '319.0.0'
+        project_id: ${{ secrets.GKE_PROJECT_PROD }}
+        service_account_email: ${{ secrets.GKE_EMAIL_PROD }}
+        service_account_key: ${{ secrets.GKE_KEY_PROD }}
+    - run: gcloud info
+
+    # Configure docker to use the gcloud command-line tool as a credential helper
+
+    - name: Set up docker to authenticate via gcloud command-line tool.
+      run: gcloud auth configure-docker
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v1
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
+
+    - name: Cache Docker layers
+      uses: actions/cache@v2
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+
+    - name: Docker Build & Push to GCR
+      id: docker_build
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: |
+          gcr.io/$GCP_PROJECT/github-runner:prod-${{ github.sha }}
+          gcr.io/$GCP_PROJECT/github-runner:latest
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache
+
+    - name: Set up kustomize
+      uses: imranismail/setup-kustomize@v1.5.2
+      with:
+        kustomize-version: "3.8.5"
+
+    # Set up Kubectl
+    - name: Set up Kubectl
+      run: |
+        curl -LO https://storage.googleapis.com/kubernetes-release/release/`curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt`/bin/linux/amd64/kubectl
+        chmod +x ./kubectl
+        sudo mv ./kubectl /usr/bin/kubectl
+
+    # Set up env permission
+    - name: Set up Kustomize
+      run: sudo chown -R $USER:$USER ${{ github.workspace }}/.env
+
+    # Deploy the Docker image to the GKE private cluster
+    - name: Deploying to prod cluster
+      run: |
+        gcloud container clusters get-credentials $GKE_CLUSTER --region $GKE_REGION --project $GKE_PROJECT
+        echo "Generating resources for Github Runner and applying configuration..."
+        kustomize edit set image $IMAGE_NAME:$TAG
+        kustomize build | kubectl apply -f -
+        echo "Checking status for Github Runner deployment..."
+        kubectl rollout status deployment/github-runner -n github
+      env:
+        GKE_REGION: ${{ secrets.GKE_REGION }}
+        GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+        GKE_PROJECT: ${{ secrets.GKE_PROJECT_PROD }}
+        IMAGE_NAME: gcr.io/$GCP_PROJECT/github-runner
+        TAG: prod-${{ github.sha }}
